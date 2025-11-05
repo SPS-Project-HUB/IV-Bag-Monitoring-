@@ -195,7 +195,7 @@
                         <div class="dashboard-card p-3 mb-3">
                             <h5><i class="fas fa-bell me-2"></i>Alert Status</h5>
                             <div id="alertStatus" class="alert alert-success mb-0">
-                                <i class="fas fa-check-circle me-2"></i>All Systems Normal
+                                <i class="fas fa-check-circle me-2"></i>System Ready - Set Zero Point
                             </div>
                         </div>
                     </div>
@@ -204,7 +204,7 @@
                             <h5><i class="fas fa-microchip me-2"></i>Device Status</h5>
                             <div id="deviceStatus" class="connection-status bg-light">
                                 <span class="status-indicator status-offline"></span>
-                                <span>Device Offline</span>
+                                <span>Waiting for Zero Point</span>
                             </div>
                         </div>
                     </div>
@@ -358,6 +358,60 @@
             }
         }
 
+        // Update Alert Status based on Fluid Level Stage
+        function updateAlertStatus(stageInfo) {
+            const alertElement = document.getElementById('alertStatus');
+            
+            switch(stageInfo.stage) {
+                case 'full':
+                    alertElement.className = 'alert alert-success';
+                    alertElement.innerHTML = '<i class="fas fa-check-circle me-2"></i>Good Fluid Level - Normal Operation';
+                    break;
+                case 'medium':
+                    alertElement.className = 'alert alert-warning';
+                    alertElement.innerHTML = '<i class="fas fa-exclamation-triangle me-2"></i>Medium Fluid Level - Monitor Closely';
+                    break;
+                case 'low':
+                    alertElement.className = 'alert alert-danger alert-badge';
+                    alertElement.innerHTML = '<i class="fas fa-exclamation-circle me-2"></i>Low Fluid Level - Replace Soon';
+                    break;
+                case 'empty':
+                    alertElement.className = 'alert alert-secondary';
+                    alertElement.innerHTML = '<i class="fas fa-info-circle me-2"></i>Set Zero Point to Start Monitoring';
+                    break;
+                default:
+                    alertElement.className = 'alert alert-info';
+                    alertElement.innerHTML = '<i class="fas fa-question-circle me-2"></i>System Initializing';
+            }
+        }
+
+        // Update Device Status based on Fluid Level Stage
+        function updateDeviceStatus(stageInfo) {
+            const deviceElement = document.getElementById('deviceStatus');
+            
+            switch(stageInfo.stage) {
+                case 'full':
+                    deviceElement.className = 'connection-status bg-success text-white';
+                    deviceElement.innerHTML = '<span class="status-indicator status-online"></span><span>Online - Full Bag</span>';
+                    break;
+                case 'medium':
+                    deviceElement.className = 'connection-status bg-warning text-dark';
+                    deviceElement.innerHTML = '<span class="status-indicator status-warning"></span><span>Online - Medium Bag</span>';
+                    break;
+                case 'low':
+                    deviceElement.className = 'connection-status bg-danger text-white';
+                    deviceElement.innerHTML = '<span class="status-indicator status-warning"></span><span>Online - Low Bag</span>';
+                    break;
+                case 'empty':
+                    deviceElement.className = 'connection-status bg-light';
+                    deviceElement.innerHTML = '<span class="status-indicator status-offline"></span><span>Waiting for Zero Point</span>';
+                    break;
+                default:
+                    deviceElement.className = 'connection-status bg-light';
+                    deviceElement.innerHTML = '<span class="status-indicator status-offline"></span><span>Initializing</span>';
+            }
+        }
+
         // Update display with new data
         function updateDisplay(data) {
             const currentWeight = parseFloat(data.current_weight) || 0;
@@ -392,6 +446,10 @@
             const stageElement = document.getElementById('stageIndicator');
             stageElement.className = `stage-indicator stage-${stageInfo.stage}`;
             stageElement.innerHTML = `<i class="fas fa-${getStageIcon(stageInfo.stage)} me-2"></i>${stageInfo.text}`;
+            
+            // Update Alert Status and Device Status based on fluid level stage
+            updateAlertStatus(stageInfo);
+            updateDeviceStatus(stageInfo);
             
             // Update numeric displays
             document.getElementById('currentWeight').textContent = currentWeight.toFixed(2);
@@ -446,37 +504,6 @@
                 case 'low': return 'danger';
                 case 'empty': return 'secondary';
                 default: return 'info';
-            }
-        }
-
-        // Handle alert status
-        function updateAlertStatus(alertData) {
-            const alertElement = document.getElementById('alertStatus');
-            const deviceStatus = document.getElementById('deviceStatus');
-            
-            if (alertData === 'NORMAL') {
-                alertElement.className = 'alert alert-success';
-                alertElement.innerHTML = '<i class="fas fa-check-circle me-2"></i>All Systems Normal';
-                deviceStatus.className = 'connection-status bg-light';
-                deviceStatus.innerHTML = '<span class="status-indicator status-online"></span><span>Device Online</span>';
-            } else if (alertData === 'OVERLOAD') {
-                alertElement.className = 'alert alert-warning alert-badge';
-                alertElement.innerHTML = '<i class="fas fa-exclamation-triangle me-2"></i>Warning: Overload Detected';
-                deviceStatus.className = 'connection-status bg-warning text-dark';
-                deviceStatus.innerHTML = '<span class="status-indicator status-warning"></span><span>Overload Warning</span>';
-                addAlertToHistory('OVERLOAD', 'Weight exceeds safe limits');
-            } else if (alertData === 'EMPTY') {
-                alertElement.className = 'alert alert-danger alert-badge';
-                alertElement.innerHTML = '<i class="fas fa-skull-crossbones me-2"></i>Critical: Bag Empty';
-                deviceStatus.className = 'connection-status bg-danger text-white';
-                deviceStatus.innerHTML = '<span class="status-indicator status-warning"></span><span>Empty Bag Alert</span>';
-                addAlertToHistory('EMPTY', 'IV bag is empty');
-            } else if (alertData === 'CRITICAL') {
-                alertElement.className = 'alert alert-danger alert-badge';
-                alertElement.innerHTML = '<i class="fas fa-bell me-2"></i>CRITICAL ALERT: Check Immediately';
-                deviceStatus.className = 'connection-status bg-danger text-white';
-                deviceStatus.innerHTML = '<span class="status-indicator status-warning"></span><span>Critical Alert</span>';
-                addAlertToHistory('CRITICAL', 'Critical condition detected');
             }
         }
 
@@ -539,6 +566,10 @@
             document.getElementById('maxWeight').textContent = '0.00 kg';
             document.getElementById('stageIndicator').className = 'stage-indicator stage-full';
             document.getElementById('stageIndicator').innerHTML = '<i class="fas fa-check-circle me-2"></i>Zero Set - Monitoring';
+            
+            // Update Alert and Device Status
+            updateAlertStatus({ stage: "full", text: "Good Level" });
+            updateDeviceStatus({ stage: "full", text: "Good Level" });
         }
 
         // Update threshold value
@@ -559,7 +590,6 @@
                 const data = snapshot.val();
                 if (data) {
                     updateDisplay(data);
-                    updateAlertStatus(data.alert_status);
                 }
             });
         }
