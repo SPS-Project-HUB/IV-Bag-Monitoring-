@@ -1,0 +1,516 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <HX711.h>
+#include <WiFi.h>
+#include <FirebaseESP32.h>
+
+// WiFi credentials
+#define WIFI_SSID "iPhone"
+#define WIFI_PASSWORD "murugaraj6385479706"
+
+// Firebase configuration
+#define FIREBASE_HOST "iv-bag-monitoring-52af7-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define FIREBASE_AUTH "vJUuxgLv1coBAt719ylfxYlMUWtHsw6Ti72uvs3F"
+
+// HX711 circuit wiring
+#define LOADCELL_DOUT_PIN 16
+#define LOADCELL_SCK_PIN 4
+#define TARE_BUTTON_PIN 14
+#define BUZZER_PIN 12
+
+// LCD I2C address
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+HX711 scale;
+
+// Firebase objects
+FirebaseData firebaseData;
+FirebaseConfig config;
+FirebaseAuth auth;
+
+// Variables
+float weight = 0;
+float previous_weight = 0;
+float zero_weight = 0;
+float calibration_factor = -96650;
+bool lastButtonState = HIGH;
+bool currentButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+
+// Buzzer and alert variables
+bool alert_active = false;
+unsigned long last_buzzer_time = 0;
+unsigned long last_alert_check = 0;
+unsigned long last_firebase_update = 0;
+int buzzer_pattern_step = 0;
+const float ALERT_THRESHOLD = 0.5;
+
+// System status
+String system_status = "Initializing";
+String alert_status = "None";
+bool wifi_connected = false;
+bool firebase_connected = false;
+
+// Buzzer patterns
+void positiveAlertPattern() {
+  unsigned long current_time = millis();
+  
+  switch(buzzer_pattern_step) {
+    case 0:
+      tone(BUZZER_PIN, 1000, 200);
+      buzzer_pattern_step = 1;
+      last_buzzer_time = current_time;
+      break;
+    case 1:
+      if (current_time - last_buzzer_time > 300) {
+        buzzer_pattern_step = 2;
+      }
+      break;
+    case 2:
+      tone(BUZZER_PIN, 1200, 200);
+      buzzer_pattern_step = 3;
+      last_buzzer_time = current_time;
+      break;
+    case 3:
+      if (current_time - last_buzzer_time > 1000) {
+        buzzer_pattern_step = 0;
+      }
+      break;
+  }
+}
+
+void negativeAlertPattern() {
+  unsigned long current_time = millis();
+  
+  switch(buzzer_pattern_step) {
+    case 0:
+      tone(BUZZER_PIN, 800, 500);
+      buzzer_pattern_step = 1;
+      last_buzzer_time = current_time;
+      break;
+    case 1:
+      if (current_time - last_buzzer_time > 800) {
+        buzzer_pattern_step = 2;
+      }
+      break;
+    case 2:
+      tone(BUZZER_PIN, 600, 100);
+      buzzer_pattern_step = 3;
+      last_buzzer_time = current_time;
+      break;
+    case 3:
+      if (current_time - last_buzzer_time > 800) {
+        buzzer_pattern_step = 0;
+      }
+      break;
+  }
+}
+
+void criticalAlertPattern() {
+  unsigned long current_time = millis();
+  
+  if (current_time - last_buzzer_time > 200) {
+    tone(BUZZER_PIN, 1500, 150);
+    last_buzzer_time = current_time;
+  }
+}
+
+void stopBuzzer() {
+  noTone(BUZZER_PIN);
+  buzzer_pattern_step = 0;
+  alert_active = false;
+}
+
+void checkAlerts() {
+  float weight_difference = weight - zero_weight;
+  
+  if (abs(weight_difference) > ALERT_THRESHOLD) {
+    alert_active = true;
+    
+    lcd.setCursor(0, 1);
+    
+    if (weight_difference > 0) {
+      alert_status = "OVERLOAD";
+      lcd.print("ALERT: OVERLOAD! ");
+      positiveAlertPattern();
+    } else {
+      alert_status = "EMPTY";
+      lcd.print("ALERT: EMPTY!   ");
+      negativeAlertPattern();
+    }
+    
+    if (abs(weight_difference) > 2.0) {
+      alert_status = "CRITICAL";
+      lcd.setCursor(0, 1);
+      lcd.print("CRITICAL ALERT! ");
+      criticalAlertPattern();
+    }
+    
+  } else {
+    if (alert_active) {
+      stopBuzzer();
+    }
+    alert_status = "NORMAL";
+    lcd.setCursor(0, 1);
+    
+    if (weight_difference > 0) {
+      lcd.print("OK - Flowing    ");
+    } else if (weight_difference < -0.1) {
+      lcd.print("Low - Check     ");
+    } else {
+      lcd.print("Set Zero First  ");
+    }
+  }
+}
+
+void connectToWiFi() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting WiFi ");
+  lcd.setCursor(0, 1);
+  lcd.print(WIFI_SSID);
+  
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    wifi_connected = true;
+    system_status = "WiFi Connected";
+    Serial.println("\nWiFi connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Connected! ");
+    lcd.setCursor(0, 1);
+    lcd.print("IP: ");
+    lcd.print(WiFi.localIP().toString().substring(0, 12));
+    delay(2000);
+  } else {
+    wifi_connected = false;
+    system_status = "WiFi Failed";
+    Serial.println("\nWiFi connection failed!");
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Failed!    ");
+    lcd.setCursor(0, 1);
+    lcd.print("Check Credentials");
+    delay(2000);
+  }
+}
+
+void initializeFirebase() {
+  if (!wifi_connected) {
+    Serial.println("Cannot initialize Firebase - No WiFi connection");
+    return;
+  }
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Firebase Init...");
+  
+  // Configure Firebase with new syntax
+  config.host = FIREBASE_HOST;
+  config.signer.tokens.legacy_token = FIREBASE_AUTH;
+  
+  Firebase.reconnectWiFi(true);
+  
+  // Initialize Firebase
+  Firebase.begin(&config, &auth);
+  
+  // Set database buffer sizes
+  firebaseData.setBSSLBufferSize(1024, 1024);
+  firebaseData.setResponseSize(1024);
+  Firebase.setReadTimeout(firebaseData, 1000 * 60);
+  // Removed setWriteTimeout as it doesn't exist in this library version
+  
+  // Test Firebase connection
+  if (Firebase.setString(firebaseData, "/system/status", "connected")) {
+    firebase_connected = true;
+    system_status = "Firebase Connected";
+    Serial.println("Firebase connected successfully!");
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Firebase Ready! ");
+    lcd.setCursor(0, 1);
+    lcd.print("Data Syncing... ");
+    delay(2000);
+  } else {
+    firebase_connected = false;
+    system_status = "Firebase Failed";
+    Serial.println("Firebase connection failed!");
+    Serial.println(firebaseData.errorReason());
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Firebase Error! ");
+    lcd.setCursor(0, 1);
+    lcd.print("Check Config    ");
+    delay(2000);
+  }
+}
+
+void updateFirebase() {
+  if (!firebase_connected) {
+    return;
+  }
+  
+  String timestamp = String(millis());
+  
+  // Update current readings
+  Firebase.setFloat(firebaseData, "/readings/current_weight", weight);
+  Firebase.setFloat(firebaseData, "/readings/zero_point", zero_weight);
+  Firebase.setFloat(firebaseData, "/readings/weight_difference", weight - zero_weight);
+  Firebase.setString(firebaseData, "/readings/alert_status", alert_status);
+  Firebase.setString(firebaseData, "/readings/system_status", system_status);
+  Firebase.setString(firebaseData, "/readings/last_update", timestamp);
+  
+  // Update system info
+  Firebase.setBool(firebaseData, "/system/wifi_connected", wifi_connected);
+  Firebase.setBool(firebaseData, "/system/firebase_connected", firebase_connected);
+  Firebase.setString(firebaseData, "/system/device_id", "ESP32_IV_Monitor_01");
+  
+  // Add to history (limit the history size in your app)
+  String historyPath = "/history/" + timestamp;
+  Firebase.setFloat(firebaseData, historyPath + "/weight", weight);
+  Firebase.setString(firebaseData, historyPath + "/alert_status", alert_status);
+  Firebase.setString(firebaseData, historyPath + "/timestamp", timestamp);
+  
+  // Update alert log if there's an active alert
+  if (alert_status != "NORMAL") {
+    String alertPath = "/alerts/" + timestamp;
+    Firebase.setString(firebaseData, alertPath + "/type", alert_status);
+    Firebase.setFloat(firebaseData, alertPath + "/weight", weight);
+    Firebase.setFloat(firebaseData, alertPath + "/difference", weight - zero_weight);
+    Firebase.setString(firebaseData, alertPath + "/timestamp", timestamp);
+  }
+  
+  Serial.println("Firebase updated successfully!");
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("IV Bag Monitor  ");
+  lcd.setCursor(0, 1);
+  lcd.print("Booting...      ");
+  
+  // Initialize buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  
+  // Initialize scale
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(calibration_factor);
+  scale.tare();
+  zero_weight = 0;
+  
+  // Initialize tare button
+  pinMode(TARE_BUTTON_PIN, INPUT_PULLUP);
+  
+  // Test buzzer on startup
+  tone(BUZZER_PIN, 1000, 200);
+  delay(300);
+  tone(BUZZER_PIN, 1500, 200);
+  delay(300);
+  noTone(BUZZER_PIN);
+  
+  delay(2000);
+  
+  // Connect to WiFi and Firebase
+  connectToWiFi();
+  if (wifi_connected) {
+    initializeFirebase();
+  }
+  
+  lcd.clear();
+  
+  Serial.println("IV Bag Monitoring System with Firebase Initialized");
+}
+
+void loop() {
+  // Handle WiFi reconnection
+  if (WiFi.status() != WL_CONNECTED && wifi_connected) {
+    wifi_connected = false;
+    firebase_connected = false;
+    system_status = "WiFi Lost";
+    connectToWiFi();
+    if (wifi_connected) {
+      initializeFirebase();
+    }
+  }
+  
+  // Read button with debouncing
+  bool reading = digitalRead(TARE_BUTTON_PIN);
+  
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+  
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != currentButtonState) {
+      currentButtonState = reading;
+      
+      if (currentButtonState == LOW) {
+        scale.tare();
+        zero_weight = 0;
+        stopBuzzer();
+        system_status = "Zero Set - Ready";
+        
+        lcd.setCursor(0, 1);
+        lcd.print("Zero Set! Ready ");
+        Serial.println("Zero set - system ready for IV bag");
+        
+        // Update Firebase immediately after tare
+        updateFirebase();
+        
+        tone(BUZZER_PIN, 2000, 100);
+        delay(150);
+        noTone(BUZZER_PIN);
+        
+        delay(500);
+      }
+    }
+  }
+  
+  lastButtonState = reading;
+
+  // Read scale with stability check
+  if (scale.wait_ready_timeout(200)) {
+    previous_weight = weight;
+    weight = scale.get_units(5);
+    
+    if (abs(weight) < 0.01) {
+      weight = 0.00;
+    }
+    
+    // Update display
+    lcd.setCursor(0, 0);
+    lcd.print("W:");
+    lcd.print(weight, 2);
+    lcd.print("kg ");
+    
+    // Show connection status on display
+    if (firebase_connected) {
+      lcd.print("FB:OK");
+    } else if (wifi_connected) {
+      lcd.print("WiFi:OK");
+    } else {
+      lcd.print("Offline");
+    }
+    
+    // Check for alerts every 500ms
+    if (millis() - last_alert_check > 500) {
+      checkAlerts();
+      last_alert_check = millis();
+    }
+    
+    // Update Firebase every 3 seconds or when weight changes significantly
+    if (millis() - last_firebase_update > 3000 || abs(weight - previous_weight) > 0.1) {
+      updateFirebase();
+      last_firebase_update = millis();
+    }
+    
+    // Serial output for monitoring
+    Serial.print("Weight: ");
+    Serial.print(weight, 3);
+    Serial.print(" kg, Diff: ");
+    Serial.print(weight - zero_weight, 3);
+    Serial.print(" kg, Alert: ");
+    Serial.println(alert_status);
+    
+  } else {
+    Serial.println("HX711 not found!");
+    system_status = "Scale Error";
+    lcd.setCursor(0, 0);
+    lcd.print("Scale Error!    ");
+    lcd.setCursor(0, 1);
+    lcd.print("Check Wiring    ");
+  }
+  
+  delay(200);
+}
+
+void calibrate() {
+  Serial.println("Calibration started...");
+  system_status = "Calibration Mode";
+  
+  lcd.setCursor(0, 0);
+  lcd.print("Calibration Mode");
+  lcd.setCursor(0, 1);
+  lcd.print("Remove Weight   ");
+  delay(5000);
+  
+  scale.tare();
+  Serial.println("Tare done...");
+  
+  Serial.println("Place known weight on scale");
+  lcd.setCursor(0, 1);
+  lcd.print("Add Known Weight");
+  delay(5000);
+  
+  long reading = scale.get_units(10);
+  float known_weight = 1.0;
+  calibration_factor = reading / known_weight;
+  
+  Serial.print("Calibration factor: ");
+  Serial.println(calibration_factor);
+  scale.set_scale(calibration_factor);
+  
+  // Update Firebase with new calibration factor
+  if (firebase_connected) {
+    Firebase.setFloat(firebaseData, "/system/calibration_factor", calibration_factor);
+  }
+  
+  lcd.setCursor(0, 0);
+  lcd.print("Cal Complete!   ");
+  lcd.setCursor(0, 1);
+  lcd.print("Factor: ");
+  lcd.print(calibration_factor);
+  delay(3000);
+  
+  system_status = "Normal Operation";
+  lcd.clear();
+}
+
+void serialEvent() {
+  if (Serial.available()) {
+    char input = Serial.read();
+    if (input == 't' || input == 'T') {
+      scale.tare();
+      zero_weight = 0;
+      stopBuzzer();
+      system_status = "Tared via Serial";
+      updateFirebase();
+      Serial.println("Tared via serial");
+    }
+    if (input == 'c' || input == 'C') {
+      calibrate();
+    }
+    if (input == 's' || input == 'S') {
+      stopBuzzer();
+      Serial.println("Buzzer stopped via serial");
+    }
+    if (input == 'r' || input == 'R') {
+      connectToWiFi();
+      if (wifi_connected) {
+        initializeFirebase();
+      }
+      Serial.println("Reconnecting to WiFi and Firebase");
+    }
+  }
+}
